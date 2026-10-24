@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>02 · Major Airline Data Dump —— 一张证书泄露的内部 API · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-01.html">← 暴露的数据库</a><a href="wu-03.html">目录列表暴露 →</a></div></nav></header>
+<main><article><h1>02 · Major Airline Data Dump —— 一张证书泄露的内部 API</h1>
+<blockquote><p>系列第 2 题 · 对应真实事件：暴露的 API 导致数千乘客个人信息、订票与行程泄露（原赏金 $3,000）<br>· 我的净耗时：约 35 分钟（其中约 20 分钟花在一条后来被证明错误的路上）</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>You've been given access to a major airline's booking system. Word on the street<br>is that the developers left something exposed that reveals more than it should.<br>Your mission: explore the target, find what the developers forgot to hide.</p></blockquote>
+<p>靶场地址：<code>https://&lt;REDACTED_DOMAIN&gt;/</code></p>
+<h2>我的判断路径</h2>
+<p>"developers left something exposed"（开发者忘了藏某样东西）是个宽泛提示，<br>可能是 <code>.git</code>、<code>.env</code>、备份文件、API 文档任何一种。我先按惯性走了主动探测的路，<br>碰壁后才切换到被动侦察——这个顺序问题成了本题最大的教训，也是整个项目的方法论转折点。</p>
+<h2>过程</h2>
+<h3>1. 站点侦察：一个纯静态的"壳"</h3>
+<p>首页 6.9KB，"航空公司订票站"，但细看不对劲：<strong>没有任何 JavaScript</strong>，<br>搜索表单没有提交逻辑，导航全是页内锚点。响应头暴露 <code>X-Powered-By: Express</code>。</p>
+<p>我由此判断：真正有攻击面的东西不在这个页面里，在别处。</p>
+<h3>2. 弯路：字典爆破先行（~20 分钟，全部落空）</h3>
+<p>我拿常见敏感路径字典跑了 GET + POST 双方法共 40+ 个路径：<br><code>.git/</code>、<code>.env</code>、<code>swagger</code>、<code>api/</code>、<code>admin</code>、<code>login</code>……全部 404。<br><code>OPTIONS /</code> 返回 <code>Allow: GET, HEAD</code>，连方法层面都没留口子。</p>
+<p>唯一的非 404 是 <code>/health</code>：</p>
+<pre class="code json"><code>{"status":"healthy","service":"nagli-airlines-api"}</code></pre>
+<p>这确认了背后确实有一个 API 服务在跑——但它不在我猜的任何路径上。</p>
+<h3>3. 转折：被动侦察一击致命</h3>
+<p>我停掉字典，改为问"<strong>这个域名本身对外暴露了什么信息</strong>"。<br>第一件事就是看 TLS 证书的 SAN（Subject Alternative Name）字段：</p>
+<pre class="code bash"><code>openssl s_client -connect &lt;REDACTED_DOMAIN&gt;:443 -servername &lt;REDACTED_DOMAIN&gt; &lt;/dev/null \
+  | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"</code></pre>
+<pre class="code"><code>DNS:&lt;REDACTED_DOMAIN&gt;, DNS:api.&lt;REDACTED_DOMAIN&gt;</code></pre>
+<p><strong>证书 SAN 里躺着一个从未在任何页面出现过的内部 API 子域名。</strong><br>这就是题面说的"忘了藏的东西"——把内部域名签进公开证书，等于免费昭告天下。</p>
+<p>顺手又查了 CT 日志（crt.sh，查询 <code>%.&lt;REDACTED_DOMAIN&gt;</code>），把全部子域名枚举了一遍——<br>这一步的收益远超本题：后面 7 道题的靶场域名全部来自这张"战场地图"。</p>
+<h3>4. API 子域：Swagger 文档暴露 + 无认证 IDOR</h3>
+<p><code>api.&lt;REDACTED_DOMAIN&gt;/docs</code> 返回 Swagger UI，OpenAPI 规范内嵌在<br><code>/docs/swagger-ui-init.js</code> 里，共 10 个接口，全部围绕 <code>memberId</code> 取乘客数据：</p>
+<pre class="code"><code>/api/getBookings       /api/getContactInfo    /api/getFlightHistory
+/api/getMembership     /api/getMemberships    /api/getPaymentMethods
+/api/searchListMember  /api/searchMemberInfo  /api/updateMemberInfo
+/api/updateMergeMemberInfo</code></pre>
+<p>我逐个无认证调用，发现防御只做了一半：</p>
+<table><thead><tr><th>接口</th><th>无认证结果</th></tr></thead><tbody><td><code>getMemberships</code></td><td><strong>200，直接吐出 2 名乘客完整档案</strong>：姓名、邮箱、电话、住址、生日、信用卡后四位</td></tr><tr><td><code>getMembership?memberId=…</code></td><td>200，返回单人口径完整档案</td></tr><tr><td><code>getFlightHistory</code> / <code>getPaymentMethods</code> / <code>searchMemberInfo</code></td><td>200，行程与支付信息裸奔</td></tr><tr><td><code>getBookings</code> / <code>getContactInfo</code></td><td>401，有真正的 token 校验</td></tr></tbody></table>
+<p>用 <code>getMemberships</code> 泄露的真实 memberId（<code>72041008520</code>）代入 <code>getMembership</code>，<br>返回的完整 JSON 中就带着 <code>"flag": "&lt;REDACTED&gt;"</code> 字段。</p>
+<p>（我还顺手试了那两个 401 接口的绕过：<code>Bearer null</code>、<code>Bearer &lt;memberId&gt;</code>、伪造 Basic 头，<br>全部失败——说明不是统一的疏忽，而是<strong>部分接口做了校验、部分没做</strong>。）</p>
+<h3>5. 最后一个小坑</h3>
+<p>前两轮我都只看了响应的前几百字符，flag 藏在 JSON 后半段，差点漏掉。<br>改为<strong>全量落盘到文件再 <code>grep -ri</code> 特征</strong>，立刻命中。</p>
+<h2>关键命令（脱敏后结构可复用）</h2>
+<pre class="code bash"><code># 被动侦察：证书 SAN + CT 日志
+openssl s_client -connect &lt;REDACTED_DOMAIN&gt;:443 -servername &lt;REDACTED_DOMAIN&gt; &lt;/dev/null \
+  | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"
+
+# API 文档与数据
+curl https://api.&lt;REDACTED_DOMAIN&gt;/docs/swagger-ui-init.js          # 内嵌 OpenAPI 规范
+curl https://api.&lt;REDACTED_DOMAIN&gt;/api/getMemberships               # 无认证 → 乘客档案
+curl "https://api.&lt;REDACTED_DOMAIN&gt;/api/getMembership?memberId=72041008520" \
+  -o member.json &amp;&amp; grep -o '"flag":"[^"]*"' member.json            # 全量落盘再搜</code></pre>
+<h2>失败与弯路（本题是全项目最重要的一课）</h2>
+<ul><li><strong>40+ 路径字典 + 双方法探测 ≈ 20 分钟颗粒无收</strong>；而证书 SAN + CT 日志 <strong>5 分钟</strong></li></ul>
+<p>  拿到了本题答案外加后续 7 题的靶场地图。成本收益完全倒挂。</p>
+<ul><li>从此我把作业顺序规则化：<strong>被动侦察（DNS/证书/CT/指纹）永远先于字典爆破</strong>。</li></ul>
+<p>  这个规则在第 3 题立刻兑现（10 分钟速通）。</p>
+<ul><li>只看响应开头几百字符的习惯差点让我漏掉 flag——证据要全量落盘再搜索。</li></ul>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li>内部域名/服务名永远不进公开证书 SAN；用泛域名证书或按需签发</li><li>API 文档（Swagger/OpenAPI）生产环境必须下线或鉴权</li><li>鉴权要在网关层统一做，而不是每个接口各自为政——本题"一半裸奔一半有锁"就是反面教材</li><li>对象级授权（BOLA/IDOR）：memberId 属于可枚举的顺序 ID，应改用不可预测标识 + 归属校验</li></ol>
+<h2>证据</h2>
+<ul><li><code>evidence/02-1-flag-submitted.png</code> —— 提交成功页面</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

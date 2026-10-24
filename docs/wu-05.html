@@ -1,0 +1,44 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>05 · Root Domain Takeover on Fintech Company —— 还在服役的 DNS，已经死去的服务 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-04.html">← 工单存储型 XSS</a><a href="wu-06.html">SSRF →</a></div></nav></header>
+<main><article><h1>05 · Root Domain Takeover on Fintech Company —— 还在服役的 DNS，已经死去的服务</h1>
+<blockquote><p>系列第 5 题 · 对应真实事件：过期 DNS 记录导致金融科技公司域名被完全接管（原赏金 $2,000）<br>· 我的净耗时：约 30 秒（全项目最快）</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>Their DNS records are pointing somewhere - but is anyone still home?<br>When companies migrate services or shut down resources, sometimes the DNS<br>sticks around longer than it should.<br>Your mission: investigate the DNS, find the unclaimed resource, and claim your flag.</p></blockquote>
+<p>靶场地址：<code>https://&lt;REDACTED_DOMAIN&gt;/</code></p>
+<h2>我的判断路径</h2>
+<p>子域名/域名接管（subdomain takeover）的侦察有三步定式，我按顺序走：</p>
+<ol><li>查 DNS 记录指向（A / CNAME / NS）</li><li>访问目标，识别<strong>服务商错误签名</strong>——不同平台的"资源不存在"错误各有特征</li></ol>
+<p>   （S3 的 <code>NoSuchBucket</code>、Heroku 的 "No such app"、GitHub Pages 的 404 页……）</p>
+<ol><li>对照社区维护的接管可行性清单（如 can-i-take-over-xyz 项目）确认可利用性</li></ol>
+<p>DNS 类题目侦察成本极低，所以我在排期上把它提到了技术型题目前面。</p>
+<h2>过程（一步到位）</h2>
+<h3>DNS 三查 + 一次 HTTP 探测</h3>
+<pre class="code"><code>nslookup &lt;REDACTED_DOMAIN&gt;            → A 记录指向 &lt;REDACTED_IP&gt;，无 CNAME
+nslookup -type=NS &lt;父域&gt;              → Cloudflare 托管 DNS
+curl https://&lt;REDACTED_DOMAIN&gt;/       → HTTP 404，返回 AWS S3 风格 XML</code></pre>
+<p>那个 404 响应体就是全部答案：</p>
+<pre class="code xml"><code>&lt;!-- Flag: &lt;REDACTED&gt; --&gt;
+&lt;Error&gt;
+  &lt;Code&gt;NoSuchBucket&lt;/Code&gt;
+  &lt;Message&gt;The specified bucket does not exist&lt;/Message&gt;
+  &lt;BucketName&gt;&lt;REDACTED&gt;&lt;/BucketName&gt;
+  ...
+&lt;/Error&gt;</code></pre>
+<p><strong>DNS 仍然指向一个已经删除的 S3 存储桶。</strong> 真实攻击里，下一步是去 AWS 注册同名桶——<br>此后该公司域名下所有流量都会加载攻击者控制的内容。这就是题面"claim your flag"<br>的双关：认领资源，即接管域名。</p>
+<h2>方法论备注</h2>
+<ul><li><code>NoSuchBucket</code> 是 S3 接管的标志性错误签名，看一眼就能定性，不需要进一步验证</li><li>接管类漏洞是典型的<strong>低成本高影响</strong>：发现只要几分钟，报告写作清晰即可拿赏金；</li></ul>
+<p>  真实世界里云厂商（AWS/Azure/GCP）和各类 SaaS 都有对应变体</p>
+<h2>失败与弯路</h2>
+<p>无。按"侦察三步定式"走完全程没有分叉——这也是把方法论规则化的价值：<br>第 2 题交过学费后，简单题不再有思考成本。</p>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li><strong>服务下线的正确顺序是"先删 DNS，再删资源"</strong>——反过来就制造悬挂记录</li><li>定期审计 DNS 记录：逐条确认指向的资源仍然存在且归属自己</li></ol>
+<p>   （Cloudflare 等厂商已提供悬挂记录自动检测）</p>
+<ol><li>对曾指向云存储/CDN 的记录建立台账，云资源销毁流程必须联动 DNS 清理</li><li>监控侧：对自家域名配置错误页监控，<code>NoSuchBucket</code> 这类响应出现即告警</li></ol>
+<h2>证据</h2>
+<ul><li><code>evidence/05-1-flag-submitted.png</code> —— 提交成功页面</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

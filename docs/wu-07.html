@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>07 · GitHub Authentication Bypass on Major CRM —— 被删除的 token 与忘不掉的 git 历史 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-06.html">← SSRF</a><a href="wu-08.html">堆转储暴露 →</a></div></nav></header>
+<main><article><h1>07 · GitHub Authentication Bypass on Major CRM —— 被删除的 token 与忘不掉的 git 历史</h1>
+<blockquote><p>系列第 7 题 · 对应真实事件：员工公开仓库泄露凭据导致 CRM 内部系统未授权访问（原赏金 $12,000）<br>· 我的净耗时：约 40 分钟 · 全系列唯一一道<strong>必须由人完成关键一步</strong>的题</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>Developers often reference their work domains in code, configs, and scripts -<br>and sometimes those files end up in personal GitHub repositories with more<br>than just the domain name.<br>Search for "bugbountymasterclass.com" on GitHub and see what you can find.<br>Your mission: find what an employee accidentally committed.</p></blockquote>
+<p>靶场地址：<code>https://&lt;REDACTED_DOMAIN&gt;/</code>（一个仿 GitHub Enterprise 站点，<br>登录页附带 "Validate GitHub Token" 验证入口）</p>
+<h2>我的判断路径</h2>
+<p>题面直接给了 OSINT 方向：在 GitHub 公开代码里搜课程域名。我很快撞上了本题真正的考点：<br><strong>GitHub 的代码搜索（唯一能搜到文件内容的入口）必须登录才能使用</strong>。<br>这决定了本题的作业形态——我和 Agent 必须分工。</p>
+<h2>过程</h2>
+<h3>1. Agent 侧：匿名信源全线碰壁（~15 分钟）</h3>
+<p>我先把所有<strong>不需要凭据</strong>的途径走了一遍，全部落空：</p>
+<table><thead><tr><th>途径</th><th>结果</th></tr></thead><tbody><td>GitHub API 仓库搜索 / Issue 搜索 / 提交搜索</td><td><code>total_count: 0</code>（这三类搜索不索引文件内容）</td></tr><tr><td>grep.app（公开代码搜索引擎）</td><td>触发人机验证，无法访问</td></tr><tr><td>Sourcegraph 公开搜索</td><td>空结果</td></tr><tr><td>搜索引擎 site: 查询</td><td>只索引到课程官方页面和他人的 writeup</td></tr></tbody></table>
+<p>结论明确：<strong>代码搜索的登录态绕不开</strong>。</p>
+<h3>2. 人机握手：登录态操作交给人</h3>
+<p>我登录自己的 GitHub 账号，在代码搜索里输入课程域名，命中 8 个文件。<br>关键的一条来自 <code>nagliwiz/cool-stuff</code> 仓库——一个 <code>.env</code> 文件<br>（<code>nagliwiz</code> 是课程虚构的"员工"账号）。</p>
+<p>这一步完成的同时，后续全部交还 Agent。</p>
+<h3>3. Agent 侧：翻 git 历史，挖出"已删除"的凭据</h3>
+<p>用 GitHub 匿名 API 拉取仓库内容（这里有个环境插曲：<code>raw.githubusercontent.com</code><br>在本地网络无法解析，改走 <code>api.github.com</code> + <code>Accept: application/vnd.github.raw</code><br>媒体类型拿到文件原文）：</p>
+<ul><li><strong>当前版本的 <code>.env</code></strong>：只剩一行内部域名 <code>&lt;REDACTED_DOMAIN&gt;</code>（解析都不存在的</li></ul>
+<p>  剧情装饰），没有凭据</p>
+<ul><li>但提交历史里有<strong>多次 "Update .env"</strong>——有修改就有故事</li></ul>
+<p>调出历史版本，其中一次提交的 <code>.env</code> 是：</p>
+<pre class="code"><code>&lt;REDACTED_DOMAIN&gt;
+GITHUB_TOKEN=&lt;REDACTED_TOKEN&gt;</code></pre>
+<p><strong>凭据曾经提交过，后来从工作区删掉了——但 git 历史里永远都在。</strong><br>这是真实世界凭据泄露的第一大来源：<code>.gitignore</code> 加晚了，或者"删文件"被当成了"删历史"。</p>
+<h3>4. 验证收尾</h3>
+<p>把找回的 token 提交到仿企站的验证接口：</p>
+<pre class="code bash"><code>curl -X POST https://&lt;REDACTED_DOMAIN&gt;/api/validate-token \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"&lt;REDACTED_TOKEN&gt;"}'
+
+→ {"flag": "&lt;REDACTED&gt;", "message": "Token validated successfully!", "success": true}</code></pre>
+<p>（小插曲：token 字符串末尾带着出题人的花括号注释，整串提交会 401，<br>剥掉注释后纯 token 才通过——提交前先看清 token 的边界。）</p>
+<h2>人机协作复盘（本题的核心价值）</h2>
+<p>这题是"凭据归人，自动化归 Agent"协议的完整演绎：</p>
+<table><thead><tr><th>环节</th><th>执行者</th><th>为什么</th></tr></thead><tbody><td>匿名信源穷举（API/搜索引擎）</td><td>Agent</td><td>无凭据、可并行、结果可验证</td></tr><tr><td><strong>GitHub 登录与代码搜索</strong></td><td><strong>人</strong></td><td>登录态是我的资产；Agent 不持有也不应持有我的凭据</td></tr><tr><td>仓库内容/提交历史枚举</td><td>Agent</td><td>匿名 API 即可，纯机械劳动</td></tr><tr><td>token 验证与提交</td><td>Agent → 人</td><td>接口验证交 Agent，最终 flag 在课程页面由人提交</td></tr></tbody></table>
+<p>事后看，Agent 在第 1 步穷举所有匿名途径的价值不只是排除法——它把"必须动用人的<br>登录态"这个结论变成了<strong>有证据的决策</strong>，而不是偷懒的推诿。</p>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li><strong>git 历史是泄密黑洞</strong>：泄露过的凭据必须<strong>轮换</strong>（改代码/删文件毫无意义），</li></ol>
+<p>   并用 <code>git filter-repo</code> / BFG 清理历史（对已公开仓库，轮换是唯一现实解）</p>
+<ol><li>部署 pre-commit 密钥扫描（gitleaks / trufflehog 类工具），把 <code>.env</code> 类文件挡在提交前</li><li>内部系统凭据（本题的 token 能通过企业验证接口）应绑定来源 IP/设备/短有效期，</li></ol>
+<p>   即使泄露也难利用</p>
+<ol><li>员工个人仓库引用工作域名是常态，蓝队应反过来做：**主动监控公开代码库中</li></ol>
+<p>   出现自家域名的提交**（这是防御侧的 OSINT）</p>
+<h2>证据</h2>
+<ul><li><code>evidence/07-1-flag-submitted.png</code> —— 提交成功页面</li><li>含个人 GitHub 账号信息的搜索过程截图按脱敏规范未入库</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

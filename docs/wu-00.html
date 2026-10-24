@@ -1,0 +1,31 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>00 · 方法论：我和一个 GLM Agent 组队通关的作业方式 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-01.html">暴露的数据库 →</a></div></nav></header>
+<main><article><h1>00 · 方法论：我和一个 GLM Agent 组队通关的作业方式</h1>
+<blockquote><p>本文是整个项目的总纲：Agent 怎么选、人机怎么分工、每题的作业循环长什么样、<br>以及全部失败模式如何被规则化。各题细节见 01–09 各篇。</p></blockquote>
+<h2>项目设定</h2>
+<ul><li><strong>目标</strong>：一个下午的时间盒内，用 GLM 驱动的 Agent 通关 Wiz Bug Bounty Masterclass</li></ul>
+<p>  全部 9 道实操挑战并留下可验证的全过程记录</p>
+<ul><li><strong>结果</strong>：9/9，净耗时约 4.5 小时（含约 1 小时的注册链路排障）</li></ul>
+<h2>Agent 选型：不自建，用成品</h2>
+<p>我没有花时间搭 Agent 框架，直接用了一个内置 GLM 的桌面 Agent（ZCode），<br>理由按优先级：</p>
+<ol><li>它消耗的正是我手头要花掉的模型额度，等于零边际成本</li><li>自带完整工具面：shell、浏览器自动化、文件读写、联网搜索——CTF 需要的全都有</li><li>两天时间盒里，装环境调试的每一分钟都是从做题时间里偷的</li></ol>
+<p>事后验证这个取舍是对的：<strong>整个项目没有写过一行 Agent 框架代码</strong>，<br>产出全部来自"工具 + 方法论"。</p>
+<h2>人机分工协议（本项目最重要的设计）</h2>
+<p>一条原则：<strong>凭据归人，自动化归 Agent。</strong></p>
+<table><thead><tr><th>归人</th><th>归 Agent</th></tr></thead><tbody><td>注册、登录、一切持凭据的操作</td><td>侦察（DNS/证书/CT 日志/指纹）</td></tr><tr><td>需要登录态的查询（如 GitHub 代码搜索）</td><td>编码类攻击（SSRF/注入/会话伪造）</td></tr><tr><td>flag 提交与成果确认</td><td>字典爆破、批量探测</td></tr><tr><td>攻击决策与止损判断</td><td>取证分析、记录归档</td></tr></tbody></table>
+<p>Agent 从不索要我的密码；需要登录的操作一律交还给我。第 7 题是这套协议的完整演绎<br>——Agent 先穷举全部匿名信源证明"必须动用人的登录态"，我再出手搜索，命中后交还<br>Agent 翻 git 历史拿凭据。<strong>人出现在证据链要求的环节，而不是刷存在感的环节。</strong></p>
+<h2>每题标准作业循环</h2>
+<ol><li><strong>读题提题眼</strong>：把题面翻译成一个技术假设（"exposed database → ClickHouse 默认端口？"）</li><li><strong>被动侦察先行</strong>：DNS、证书 SAN、CT 日志、HTTP 指纹——成本远低于主动探测</li><li><strong>低成本主动验证</strong>：少量路径/参数确认假设，再上字典或批量</li><li><strong>假设-对照</strong>：每个注入点配对照组（第 6 题的环回/带外/穿越三连测）</li><li><strong>就地归档</strong>：攻击链、关键命令、失败弯路三段式记录 + 截图证据</li><li><strong>单题止损线</strong>：卡住 30 分钟换路径或换题，事后回来复盘</li></ol>
+<h2>失败模式清单（每条都对应一次真实翻车）</h2>
+<table><thead><tr><th>#</th><th>失败模式</th><th>规则化后的对策</th></tr></thead><tbody><td>1</td><td>浏览器自动翻译把 "Fetch failed" 机翻成无法检索的中文</td><td>排查网页报错前先关自动翻译</td></tr><tr><td>2</td><td>从截图认读域名多认一个字母，第一轮 DNS 诊断全偏</td><td>域名/URL 类证据必须来自请求记录或源码，不靠截图认字</td></tr><tr><td>3</td><td>40+ 路径字典先于被动侦察，20 分钟颗粒无收</td><td>侦察顺序硬编码：被动 → 主动 → 字典（第 2 题立规，第 3 题兑现）</td></tr><tr><td>4</td><td>注入测试只看列表页，漏掉详情页的零转义渲染</td><td>注入测试覆盖<strong>所有</strong>渲染该数据的视图</td></tr><tr><td>5</td><td>30MB 堆转储被静默截断成 1.5MB，在残缺数据上得出"无 flag"的错误倾向</td><td>二进制证据分析前先校验完整性（Content-Length/哈希对账）</td></tr><tr><td>6</td><td>shell 无法传递空字节参数，二进制搜索模式被截断，报出数千行假命中</td><td>单一工具的正结论必须换工具交叉验证</td></tr></tbody></table>
+<p>这六条的共性值得写明：<strong>Agent 的失败大多不是"不会攻击"，而是"证据质量失真"</strong><br>——翻译、OCR、截断、工具特性都在污染输入。对策不是换更聪明的模型，<br>是把证据校验做成流程。</p>
+<h2>数据</h2>
+<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody><td>通关数</td><td>9 / 9</td></tr><tr><td>净耗时</td><td>≈ 4.5 小时（单题 30 秒 ~ 50 分钟）</td></tr><tr><td>对应真实赏金合计</td><td>$93,300+</td></tr><tr><td>Agent 参与环节</td><td>侦察/攻击/取证/归档（约全部技术工作的 80%）</td></tr><tr><td>人工必需环节</td><td>注册与登录、GitHub 代码搜索、flag 提交、全部决策</td></tr></tbody></table>
+<h2>下一步</h2>
+<ul><li>把本方法论迁移到真实众测平台（相同作业循环，增加授权与范围检查环节）</li><li>值得自动化的两个环节：证据完整性校验、多工具交叉验证（见失败模式 5/6）</li><li>复盘文章与证书：仓库 README</li></ul></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

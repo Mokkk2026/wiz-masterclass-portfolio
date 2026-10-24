@@ -1,0 +1,22 @@
+# OS / editor junk
+Thumbs.db
+.DS_Store
+desktop.ini
+*.swp
+.idea/
+.vscode/
+
+# 防御性规则：任何原始/未脱敏产物绝不入库
+*.hprof
+*heapdump*
+.env
+.env.*
+private/
+*.local
+
+# 大文件
+*.zip
+*.exe
+
+# 构建中间产物
+.build/
