@@ -8,7 +8,7 @@ desktop.ini
 
 # 防御性规则：任何原始/未脱敏产物绝不入库
 *.hprof
-*heapdump*
+
 .env
 .env.*
 private/
