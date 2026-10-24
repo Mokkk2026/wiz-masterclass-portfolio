@@ -66,7 +66,8 @@ Wiz-Masterclass-通关复盘.pdf   成品 PDF（封面 + 目录 + 总览 + 十�
 
 - 官方证书（平台公开分享链接）：
   https://www.wiz.io/bug-bounty-masterclass/certificate/43a82202-6aaa-4a0b-b43a-118f380d8af1
-- 仓库地址：【待我确认：GitHub 用户名与仓库名，阶段 7 发布时回填】
+- 本仓库：https://github.com/Mokkk2026/wiz-masterclass-portfolio
+- 在线站点（GitHub Pages）：https://mokkk2026.github.io/wiz-masterclass-portfolio/
 
 ## 脱敏声明
 
