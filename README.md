@@ -79,3 +79,14 @@ Wiz-Masterclass-通关复盘.pdf   成品 PDF（封面 + 目录 + 总览 + 十�
 ---
 
 *Built with a GLM-powered agent (ZCode) · 2026-10-24*
+
+## 许可（License）
+
+本仓库按内容类型双许可：
+
+| 内容 | 许可证 | 文件 |
+|---|---|---|
+| 代码（`build_site.py`、`gen_pdf.py`） | **MIT** | [LICENSE](LICENSE) |
+| 文字与图像（writeups、evidence、站点文本、PDF） | **CC BY-NC 4.0** | [LICENSE-CC-BY-NC.md](LICENSE-CC-BY-NC.md) |
+
+简言之：代码可自由使用（保留版权声明即可）；文章与截图**可引用、可翻译、可学习，须署名、禁止商用**。
